@@ -34,7 +34,6 @@ search_app.es_client = Elasticsearch(
     verify_certs=True
 )
 
-
 CORS(auth_app , origins=["http://localhost:5173"], supports_credentials=True)
 CORS(search_app, origins=["http://localhost:5173"], supports_credentials=True)
 
@@ -63,12 +62,11 @@ class Recipe(db.Model):
 
 # Table to handle the many-to-many relationship between Folder and Recipe
 class FolderRecipe(db.Model):
+    __tablename__ = 'folder_recipe'
     id = db.Column(db.Integer, primary_key=True)
     folder_id = db.Column(db.Integer, db.ForeignKey('folder.id'), nullable=False)
     recipe_id = db.Column(db.Integer, db.ForeignKey('recipe.id'), nullable=False)
-
-    folder = db.relationship('Folder', backref=db.backref('folder_recipes', lazy=True))
-    recipe = db.relationship('Recipe', backref=db.backref('folder_recipes', lazy=True))
+    rating = db.Column(db.Integer, nullable=True)  # Rating value between 1 and 5
 
 
 def create_tables():
@@ -157,38 +155,33 @@ def delete_user_by_id(id):
 ## Check folder each user
 @auth_app.route('/user/<int:user_id>/folders', methods=['GET'])
 def get_user_folders_with_recipes(user_id):
-    # Step 1: Retrieve the user
     user = User.query.get(user_id)
     if not user:
         return jsonify({"message": "User not found!"}), 404
 
-    # Step 2: Retrieve all folders for the user
     folders = Folder.query.filter_by(user_id=user_id).all()
     if not folders:
         return jsonify({"message": "No folders found for this user!"}), 404
 
     folder_data = []
 
-    # Step 3: Process each folder
     for folder in folders:
-        # Get recipe IDs from FolderRecipe table
-        recipe_ids = (
-            db.session.query(FolderRecipe.recipe_id)
+        # Get recipe IDs and ratings from FolderRecipe table
+        folder_recipes = (
+            db.session.query(FolderRecipe.recipe_id, FolderRecipe.rating)
             .filter(FolderRecipe.folder_id == folder.id)
             .all()
         )
-        recipe_ids = [r[0] for r in recipe_ids]  # Extract IDs from query result
 
-        # Fetch recipe details from external API
         recipe_list = []
-        for recipe_id in recipe_ids:
+        for recipe_id, rating in folder_recipes:
             recipe_data = get_recipe_data(recipe_id)
             recipe_list.append({
                 "RecipeId": recipe_id,
-                "RecipeName": recipe_data.get('Name', "Unknown Recipe")
+                "RecipeName": recipe_data.get('Name', "Unknown Recipe"),
+                "Rating": rating if rating is not None else "No rating"
             })
 
-        # Step 4: Add folder data to the response
         folder_data.append({
             "FolderId": folder.id,
             "FolderName": folder.name,
@@ -213,7 +206,7 @@ def get_recipe_data(recipe_id):
         print(f"API request error for recipe {recipe_id}: {e}")
         return {"Name": "Unknown Recipe"}
 
-
+## Get only folder by userID & folderID
 @auth_app.route('/user/<int:user_id>/folders/<int:folder_id>', methods=['GET'])
 def get_user_folder_details(user_id, folder_id):
     user = User.query.get(user_id)
@@ -224,24 +217,23 @@ def get_user_folder_details(user_id, folder_id):
     if not folder:
         return jsonify({"message": "Folder not found!"}), 404
 
-    # Step 1: Get recipe IDs from FolderRecipe table
-    recipe_ids = (
-        db.session.query(FolderRecipe.recipe_id)
+    # Step 1: Get recipe IDs and ratings from FolderRecipe table
+    folder_recipes = (
+        db.session.query(FolderRecipe.recipe_id, FolderRecipe.rating)
         .filter(FolderRecipe.folder_id == folder.id)
         .all()
     )
-    recipe_ids = [r[0] for r in recipe_ids]  # Extract recipe IDs
 
-    # Step 2: Fetch recipe details from external API
     recipe_list = []
-    for recipe_id in recipe_ids:
+    for recipe_id, rating in folder_recipes:
         recipe_data = get_recipe_data(recipe_id)
         recipe_list.append({
             "RecipeId": recipe_id,
-            "RecipeName": recipe_data.get('Name', "Unknown Recipe")
+            "RecipeName": recipe_data.get('Name', "Unknown Recipe"),
+            "Rating": rating if rating is not None else "No rating"
         })
 
-    # Step 3: Add folder data to the response
+    # Step 2: Add folder data to the response
     return jsonify({
         "FolderName": folder.name,
         "CreatedAt": folder.created_at,
@@ -249,27 +241,12 @@ def get_user_folder_details(user_id, folder_id):
     })
 
 
-# def get_recipe_data(recipe_id):
-#     """Fetch recipe data from external API."""
-#     try:
-#         response = requests.get(f'http://127.0.0.1:5000/search/{recipe_id}')
-#         print(f"API Response for recipe {recipe_id}: {response.status_code}")
-#
-#         if response.status_code == 200:
-#             data = response.json()
-#             print(f"Recipe data for {recipe_id}: {data}")
-#             return data['results'][0] if data.get('results') else {"Name": "Unknown Recipe"}
-#         return {"Name": "Unknown Recipe"}
-#     except requests.exceptions.RequestException as e:
-#         print(f"API request error for recipe {recipe_id}: {e}")
-#         return {"Name": "Unknown Recipe"}
-
 
 # ========================================================================
 # Get Recipes in Folder Route
 # ========================================================================
 
-
+# Create new folder.
 @auth_app.route('/folder', methods=['POST'])
 @jwt_required()
 def create_folder():
@@ -285,15 +262,23 @@ def create_folder():
 
     return jsonify({"message": "Folder created successfully!", "folder_id": new_folder.id}), 201
 
-## Check All folder
-@auth_app.route('/folders', methods=['GET'])
-def get_user_folders():
-    folders = Folder.query.all()  # No need for user_id here
-    if not folders:
-        return jsonify({"message": "No folders found."}), 404
+## Retrieve all folders of authenticated user.
+# @auth_app.route('/folders', methods=['GET'])
+# @jwt_required()
+# def get_user_folders():
+#     user_id = get_jwt_identity()  # ดึง user_id จาก JWT Token
+#
+#     if not user_id:
+#         return jsonify({"message": "User ID is missing."}), 400
+#
+#     folders = Folder.query.filter_by(user_id=user_id).all()
+#
+#     if not folders:
+#         return jsonify({"message": "No folders found for this user."}), 404
+#
+#     folder_list = [{"id": folder.id, "name": folder.name, "created_at": folder.created_at} for folder in folders]
+#     return jsonify(folder_list), 200
 
-    folder_list = [{"id": folder.id, "name": folder.name, "created_at": folder.created_at} for folder in folders]
-    return jsonify(folder_list), 200
 
 
 ## Add Recipe in folder
@@ -302,8 +287,10 @@ def get_user_folders():
 def add_recipe_to_folder(folder_id):
     data = request.get_json()
     recipe_id = data.get('RecipeId')
+    rating_value = data.get('rating')  # ✅ ดึงค่า rating ที่ถูกส่งมา
 
-    # Check if RecipeId is provided
+    print(f"📥 Received RecipeId: {recipe_id}, Rating: {rating_value}")  # Debugging
+
     if not recipe_id:
         return jsonify({"message": "Recipe ID is required"}), 400
 
@@ -311,57 +298,50 @@ def add_recipe_to_folder(folder_id):
     if not folder:
         return jsonify({"message": "Folder not found"}), 404
 
-    # Call the external API to verify the recipe
-    try:
-        recipe_response = requests.get(f'http://127.0.0.1:5000/search/{recipe_id}')
-        if recipe_response.status_code != 200:
-            return jsonify({"message": "Recipe not found in the search API!"}), 404
-
-        recipe_data = recipe_response.json()
-        if not recipe_data or 'results' not in recipe_data or len(recipe_data['results']) == 0:
-            return jsonify({"message": "Recipe not found!"}), 404
-
-    except requests.exceptions.RequestException as e:
-        return jsonify({"message": f"Error calling the search API: {str(e)}"}), 500
-
-    # Check if the recipe already exists in the folder
     existing_entry = FolderRecipe.query.filter_by(folder_id=folder_id, recipe_id=recipe_id).first()
-    if existing_entry:
-        return jsonify({"message": "Recipe already exists in the folder"}), 400
 
-    new_entry = FolderRecipe(folder_id=folder_id, recipe_id=recipe_id)
+    if existing_entry:
+
+        print("🔄 Updating rating for existing recipe...")
+        existing_entry.rating = rating_value
+        db.session.commit()
+        return jsonify({"message": "Recipe rating updated successfully!"}), 200
+
+    print("➕ Adding new recipe with rating...")
+    new_entry = FolderRecipe(folder_id=folder_id, recipe_id=recipe_id, rating=rating_value)
     db.session.add(new_entry)
     db.session.commit()
 
     return jsonify({"message": "Recipe added to folder successfully!"}), 200
 
-@auth_app.route('/folder/<int:folder_id>/recipes', methods=['GET'])
-def get_recipes_in_folder(folder_id):
-    try:
+## Get all recipes in specific folder.
+# @auth_app.route('/folder/<int:folder_id>/recipes', methods=['GET'])
+# def get_recipes_in_folder(folder_id):
+#     try:
+#
+#         folder = db.session.get(Folder, folder_id)
+#         if not folder:
+#             return jsonify({"message": "Folder not found"}), 404
+#
+#         recipes = (
+#             db.session.query(Recipe.id, Recipe.name)
+#             .join(FolderRecipe, Recipe.id == FolderRecipe.recipe_id)
+#             .filter(FolderRecipe.folder_id == folder_id)
+#             .all()
+#         )
+#
+#         if not recipes:
+#             return jsonify({"message": "No recipes found in this folder."}), 404
+#
+#         # JSON Response
+#         recipe_list = [{"RecipeId": r.id, "RecipeName": r.name} for r in recipes]
+#
+#         return jsonify({"folder_id": folder_id, "recipes": recipe_list}), 200
+#
+#     except Exception as e:
+#         return jsonify({"message": f"An error occurred: {e}"}), 500
 
-        folder = db.session.get(Folder, folder_id)
-        if not folder:
-            return jsonify({"message": "Folder not found"}), 404
-
-        recipes = (
-            db.session.query(Recipe.id, Recipe.name)
-            .join(FolderRecipe, Recipe.id == FolderRecipe.recipe_id)
-            .filter(FolderRecipe.folder_id == folder_id)
-            .all()
-        )
-
-        if not recipes:
-            return jsonify({"message": "No recipes found in this folder."}), 404
-
-        # JSON Response
-        recipe_list = [{"RecipeId": r.id, "RecipeName": r.name} for r in recipes]
-
-        return jsonify({"folder_id": folder_id, "recipes": recipe_list}), 200
-
-    except Exception as e:
-        return jsonify({"message": f"An error occurred: {e}"}), 500
-
-
+# Delete folder
 @auth_app.route('/folder/<int:folder_id>', methods=['DELETE'])
 @jwt_required()
 def delete_folder(folder_id):
@@ -378,18 +358,17 @@ def delete_folder(folder_id):
 
     return jsonify({"message": "Folder deleted successfully!"}), 200
 
+# Delete recipe in folder
 @auth_app.route('/folder/<int:folder_id>/remove_recipe/<int:recipe_id>', methods=['DELETE'])
 @jwt_required()
 def remove_recipe_from_folder(folder_id, recipe_id):
     user_id = get_jwt_identity()  # รับค่า user_id จาก JWT
     print(f"🔍 User {user_id} is trying to remove Recipe {recipe_id} from Folder {folder_id}")
 
-    # ตรวจสอบว่าโฟลเดอร์นี้เป็นของ user หรือไม่
     folder = Folder.query.filter_by(id=folder_id, user_id=user_id).first()
     if not folder:
         return jsonify({"message": "Folder not found or unauthorized!"}), 404
 
-    # ค้นหาและลบสูตรอาหารออกจากโฟลเดอร์
     folder_recipe = FolderRecipe.query.filter_by(folder_id=folder_id, recipe_id=recipe_id).first()
     if not folder_recipe:
         return jsonify({"message": "Recipe not found in this folder!"}), 404
@@ -400,6 +379,62 @@ def remove_recipe_from_folder(folder_id, recipe_id):
     print(f"✅ Recipe {recipe_id} removed from Folder {folder_id}")
     return jsonify({"message": "Recipe removed successfully!"}), 200
 
+## Update folder name
+@auth_app.route('/folder/<int:folder_id>', methods=['PUT'])
+@jwt_required()
+def update_folder_name(folder_id):
+    user_id = get_jwt_identity()
+    data = request.get_json()
+
+    # Validate request data
+    if not data or 'name' not in data:
+        return jsonify({"message": "Folder name is required"}), 400
+
+    # Find the folder to update
+    folder = Folder.query.filter_by(id=folder_id, user_id=user_id).first()
+    if not folder:
+        return jsonify({"message": "Folder not found or unauthorized!"}), 404
+
+    # Update the folder name
+    folder.name = data['name']
+    db.session.commit()
+
+    return jsonify({"message": "Folder name updated successfully!", "folder_id": folder.id, "folder_name": folder.name}), 200
+
+## Rate recipe inside a folder.
+@auth_app.route('/folder/<int:folder_id>/recipe/<int:recipe_id>/rate', methods=['POST'])
+@jwt_required()
+def rate_recipe_in_folder(folder_id, recipe_id):
+    user_id = get_jwt_identity()
+    data = request.get_json()
+    rating_value = data.get('rating')
+
+    if rating_value is None or not (1 <= rating_value <= 5):
+        return jsonify({"message": "Rating must be between 1 and 5."}), 400
+
+    folder_recipe = FolderRecipe.query.filter_by(folder_id=folder_id, recipe_id=recipe_id).first()
+    if not folder_recipe:
+        return jsonify({"message": "Recipe not found in this folder!"}), 404
+
+    folder_recipe.rating = rating_value
+    db.session.commit()
+
+    return jsonify({"message": "Rating submitted successfully!"}), 200
+
+## Get the rating of a recipe in a folder.
+@auth_app.route('/folder/<int:folder_id>/recipe/<int:recipe_id>/rating', methods=['GET'])
+def get_recipe_rating_in_folder(folder_id, recipe_id):
+    # Fetch the recipe rating for the folder
+    folder_recipe = FolderRecipe.query.filter_by(folder_id=folder_id, recipe_id=recipe_id).first()
+
+    if not folder_recipe or folder_recipe.rating is None:
+        return jsonify({"message": "No rating found for this recipe in the folder."}), 404
+
+    return jsonify({
+        "recipe_id": recipe_id,
+        "folder_id": folder_id,
+        "rating": folder_recipe.rating
+    }), 200
 
 
 # ========================================================================
@@ -422,10 +457,8 @@ def clean_images_column(df):
 
         print(f"✅ After c() removal: {image_str}")
 
-        # ✅ ใช้ regex หาลิงก์รูปภาพทุกประเภท (JPG, PNG, GIF, WEBP, BMP, SVG, TIFF, HEIC, ICO)
         matches = re.findall(r'https://.*?\.(?:jpg|jpeg|png|gif|webp|bmp|svg|tiff|heic|ico)(?:\?.*)?', image_str, re.IGNORECASE)
 
-        # ✅ ดึงแค่ตัวแรก หรือคืนค่า None ถ้าไม่มีลิงก์
         first_match = matches[0] if matches else None
 
         print(f"🔍 Matches: {matches}")  # Debug จุดนี้
@@ -513,35 +546,124 @@ elapsed_time = end_time - start_time
 print(f"\n⏱️ Total Execution Time: {elapsed_time:.2f} seconds")
 
 
-## Search
 @search_app.route('/search', methods=['GET'])
-@search_app.route('/search/<int:recipe_id>', methods=['GET'])
-def search(recipe_id=None):
+def search():
     try:
-        # If recipe_id is provided in the URL, search for a specific recipe
-        if recipe_id:
-            query_body = {"match": {"RecipeId": recipe_id}}
+        query_term = request.args.get('query', '')  # Get query parameter
+
+        # If query_term is not provided, we use match_all to fetch all data
+        if query_term:
+            # Fuzzy search for the query term if provided
+            query_body = {
+                "query": {
+                    "fuzzy": {
+                        "combined_text": {
+                            "value": query_term,
+                            "fuzziness": "AUTO",  # Fuzziness to handle typos
+                            "prefix_length": 1
+                        }
+                    }
+                }
+            }
         else:
-            query_term = request.args.get('query', '')
-            query_body = {"match": {"combined_text": query_term}} if query_term else {"match_all": {}}
+            # Return all records if no query is provided (use match_all)
+            query_body = {
+                "query": {
+                    "match_all": {}  # Match all documents in the index
+                }
+            }
 
-        # Execute the search query
-        results = search_app.es_client.search(index='custom', size=100, query=query_body)
+        # Pagination (if you want more than 100 items, you can adjust the size)
+        query_body["from"] = 0
+        query_body["size"] = 100  # Limit the results to 100 (you can increase it as needed)
 
-        # Check if no results are found
+        results = search_app.es_client.search(index='custom', body=query_body)
+
+        # Handle no results found
         if results['hits']['total']['value'] == 0:
             return jsonify({"message": "No recipes found!"}), 404
 
-        # Return the search results
+        # Return the results
         response = {
             'status': 'success',
             'total_hit': results['hits']['total']['value'],
             'results': [hit["_source"] for hit in results['hits']['hits']]
         }
+
     except Exception as e:
         response = {'status': 'error', 'message': str(e)}
 
     return jsonify(response)
+
+
+@search_app.route('/search/<int:recipe_id>', methods=['GET'])
+def search_by_id(recipe_id):
+    try:
+        # Fetch a specific recipe by its ID
+        results = search_app.es_client.search(index='custom', body={
+            "query": {
+                "match": {
+                    "RecipeId": recipe_id
+                }
+            }
+        })
+
+        if results['hits']['total']['value'] == 0:
+            return jsonify({"message": f"No recipe found for ID {recipe_id}"}), 404
+
+        response = {
+            'status': 'success',
+            'results': [hit["_source"] for hit in results['hits']['hits']]
+        }
+
+    except Exception as e:
+        response = {'status': 'error', 'message': str(e)}
+
+    return jsonify(response)
+
+@search_app.route('/suggest', methods=['GET'])
+def suggest():
+    try:
+        query_term = request.args.get('query', '')
+
+        if not query_term:
+            return jsonify({"message": "No query provided"}), 400
+
+        suggest_query = {
+            "suggest": {
+                "text": query_term,
+                "simple_phrase": {
+                    "phrase": {
+                        "field": "combined_text",
+                        "size": 5,  # Return 5 suggestions
+                        "gram_size": 3,  # Token size
+                        "direct_generator": [{
+                            "field": "combined_text",
+                            "suggest_mode": "always"
+                        }],
+                        "highlight": {
+                            "pre_tag": "<em>",
+                            "post_tag": "</em>"
+                        }
+                    }
+                }
+            }
+        }
+
+        # Run the suggestion query
+        results = search_app.es_client.search(index='custom', body=suggest_query)
+
+        if 'suggest' in results:
+            suggestions = results['suggest']['simple_phrase'][0]['options']
+        else:
+            suggestions = []
+
+        return jsonify({
+            'status': 'success',
+            'suggestions': [suggestion['text'] for suggestion in suggestions]
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)})
 
 
 # ========================================================================
