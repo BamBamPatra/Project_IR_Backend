@@ -13,6 +13,9 @@ import time
 import pandas as pd
 import pickle
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.decomposition import TruncatedSVD
+import pickle
 
 
 # Authen.py app
@@ -161,7 +164,7 @@ def get_user_folders_with_recipes(user_id):
 
     folders = Folder.query.filter_by(user_id=user_id).all()
     if not folders:
-        return jsonify({"message": "No folders found for this user!"}), 404
+        return jsonify({"message": "No folders found for this user!"}), 200  # Return a 200 status code
 
     folder_data = []
 
@@ -263,23 +266,26 @@ def create_folder():
     return jsonify({"message": "Folder created successfully!", "folder_id": new_folder.id}), 201
 
 ## Retrieve all folders of authenticated user.
-# @auth_app.route('/folders', methods=['GET'])
-# @jwt_required()
-# def get_user_folders():
-#     user_id = get_jwt_identity()  # ดึง user_id จาก JWT Token
-#
-#     if not user_id:
-#         return jsonify({"message": "User ID is missing."}), 400
-#
-#     folders = Folder.query.filter_by(user_id=user_id).all()
-#
-#     if not folders:
-#         return jsonify({"message": "No folders found for this user."}), 404
-#
-#     folder_list = [{"id": folder.id, "name": folder.name, "created_at": folder.created_at} for folder in folders]
-#     return jsonify(folder_list), 200
+@auth_app.route('/folders', methods=['GET'])
+@jwt_required()
+def get_user_folders():
+    print("✅ /folders endpoint hit")
+    try:
+        user_id = get_jwt_identity()  # Extract user ID from the token
+        print(f"User ID from token: {user_id}")  # Debugging log to verify user ID
 
+        if not user_id:
+            return jsonify({"message": "User ID is missing."}), 400
 
+        folders = Folder.query.filter_by(user_id=user_id).all()
+
+        if not folders:
+            return jsonify([]), 200
+
+        folder_list = [{"id": folder.id, "name": folder.name, "created_at": folder.created_at} for folder in folders]
+        return jsonify(folder_list), 200
+    except Exception as e:
+        return jsonify({"message": f"Error: {str(e)}"}), 500
 
 ## Add Recipe in folder
 @auth_app.route('/folder/<int:folder_id>/add_recipe', methods=['POST'])
@@ -436,6 +442,62 @@ def get_recipe_rating_in_folder(folder_id, recipe_id):
         "rating": folder_recipe.rating
     }), 200
 
+
+with open("recipe_indexer.pkl", "rb") as f:
+    index_data = pickle.load(f)
+
+df_recipes = index_data["df"]
+tfidf_matrix = index_data["matrix"]
+lsa = TruncatedSVD(n_components=100, random_state=42)
+lsa_matrix = lsa.fit_transform(tfidf_matrix)
+
+@auth_app.route('/recommend/folder/<int:folder_id>', methods=['GET'])
+def recommend_recipes_for_folder(folder_id):
+    print(f"📥 Incoming request to /recommend/folder/{folder_id}")
+    try:
+        # Step 1: Get recipe IDs in folder
+        folder_recipes = FolderRecipe.query.filter_by(folder_id=folder_id).all()
+        if not folder_recipes:
+            return jsonify({"message": "No recipes found in this folder."}), 404
+
+        recipe_ids_in_folder = [fr.recipe_id for fr in folder_recipes]
+
+        # Step 2: Find indices of those recipe_ids in df_recipes
+        folder_indices = df_recipes[df_recipes["RecipeId"].isin(recipe_ids_in_folder)].index.tolist()
+        if not folder_indices:
+            return jsonify({"message": "No matching recipes in indexer."}), 404
+
+        # Step 3: Average vector for the folder
+        folder_vector = lsa_matrix[folder_indices].mean(axis=0).reshape(1, -1)
+
+        # Step 4: Compute cosine similarity
+        similarities = cosine_similarity(folder_vector, lsa_matrix).flatten()
+
+        # Step 5: Rank by similarity, exclude ones already in folder
+        similar_indices = similarities.argsort()[::-1]
+        recommendations = []
+        seen_ids = set(recipe_ids_in_folder)
+
+        for idx in similar_indices:
+            recipe_id = df_recipes.iloc[idx]["RecipeId"]
+            if recipe_id not in seen_ids:
+                recommendations.append({
+                    "RecipeId": int(recipe_id),
+                    "Name": df_recipes.iloc[idx]["Name"],
+                    "Similarity": float(similarities[idx]),
+                    "image_link": df_recipes.iloc[idx].get("image_link", None)
+                })
+            if len(recommendations) >= 10:
+                break
+
+        return jsonify({
+            "status": "success",
+            "folder_id": folder_id,
+            "recommendations": recommendations
+        })
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 # ========================================================================
 # Search function
